@@ -293,28 +293,28 @@ $ cargo test
     Finished `test` profile [unoptimized + debuginfo] target(s) in 6.31s
      Running unittests src\lib.rs (target\debug\deps\gitatlas-….exe)
 
-running 86 tests
-test result: ok. 86 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+running 91 tests
+test result: ok. 91 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
 
      Running tests\depo.rs (target\debug\deps\depo-….exe)
 
 running 18 tests
-test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
 
      Running tests\entegrasyon.rs (target\debug\deps\entegrasyon-….exe)
 
 running 15 tests
-test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.66s
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.28s
 
      Running tests\pack.rs (target\debug\deps\pack-….exe)
 
-running 15 tests
-test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+running 17 tests
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.85s
 
      Running tests\sema.rs (target\debug\deps\sema-….exe)
 
 running 8 tests
-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
 
      Running unittests src\main.rs (target\debug\deps\gitatlas-….exe)
 
@@ -327,7 +327,13 @@ running 0 tests
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 ```
 
-**test sonucu: okunan 142; geçen 142; başarısız 0** (86 birim + 56 entegrasyon).
+**test sonucu: okunan 149; geçen 149; başarısız 0** (91 birim + 58 entegrasyon).
+Bunların 7'si güvenlik regresyonudur: `delta.rs` içinde devasa `hedef_boyut`
+(`u64::MAX`, `2^63`, `2^40`) için tahsis yapmadan hata üreten testler, blok blok
+büyümenin birebir doğru sonuç verdiğini kanıtlayan test ve tavan içindeki 4 MiB'lık
+meşru deltanın okunduğunu gösteren test; `tests/pack.rs` içinde ise aynı saldırgan
+pack'i uçtan uca kuran `devasa_hedef_boyutlu_delta_sureci_dusurmez` ve 8 MiB'lık
+meşru deltanın çözüldüğünü gösteren `tavan_icindeki_buyuk_delta_cozulur`.
 
 ### Test depoları — nasıl üretiliyor
 
@@ -482,7 +488,7 @@ etkin değerleri her zaman raporlar.
 
 | Alan | Varsayılan | Gerekçe |
 |---|---|---|
-| `nesne_tavani` | 64 MB | Zip-bomb benzeri şişirilmiş pack'e karşı tek nesne sınırı. |
+| `nesne_tavani` | 64 MB | Zip-bomb benzeri şişirilmiş pack'e karşı tek nesne sınırı; delta başlığında *bildirilen* hedef boyut da bu tavana göre sınırlanır (bkz. madde 20). |
 | `onbellek_bayt` | 32 MB | Bayt cinsinden sınırlı LRU; 260 MB tepe RSS bütçesinin anahtarı. |
 | `delta_derinligi` | 64 | Delta zinciri sonsuz özyinelemesin; bozuk pack'te bellek şişmesin. |
 | `EN_COK_D` (fark) | 600 | Myers iz büyüklüğü ≈ 5,8 MB; aşılırsa "kaba" blok diff'i üretilir ve `kaba: true` bildirilir. |
@@ -535,6 +541,17 @@ etkin değerleri her zaman raporlar.
 19. **Ölçülmemiş iddialar.** Rapor b08'deki bellek ve süre bütçeleri (260 MB tepe
     RSS, 200.000 commit) **bu depoda ölçülmemiştir**; bunlar hedef değil, kartta
     kayıtlı tahminlerdir. README'de hiçbir yerde "ölçüldü" denmez.
+20. **Güvenilmeyen `.pack` dosyalarında bildirilen nesne boyutları `nesne_tavani`
+    ile sınırlanır.** Delta başlığındaki hedef boyut, 10 baytlık varint ile
+    teorik olarak `u64::MAX`'e kadar yazılabilir. Bu sayıya **doğrudan** güvenilse
+    (`Vec::with_capacity`) `capacity overflow` paniği doğar ve profil
+    `panic = "abort"` olduğu için araç kontrollü bir hata yerine **düşer**
+    (`0xC0000409`). Bu yüzden başlıktaki boyut, tahsis yapılmadan önce
+    `nesne_tavani` (varsayılan 64 MB) ile karşılaştırılır; hedef, komut başına blok
+    blok büyür. Aynı politika zlib çözme katmanında da geçerlidir: tavan orada
+    *şişirilmiş akışın* uzunluğunu, burada ise *bildirilen nesne boyutunu* sınırlar.
+    Meşru ve tavan içinde kalan büyük deltalar (8 MiB'a kadar ölçülmüş) etkilenmez;
+    tavan aşımı `çözme sınırı aşıldı: N bayt > M bayt` hatasıyla bildirilir.
 
 ---
 

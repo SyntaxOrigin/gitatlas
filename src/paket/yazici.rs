@@ -165,11 +165,38 @@ impl PaketYazici {
         hedef: &[u8],
         komutlar: &[u8],
     ) -> Result<(Oid, u64), Hata> {
+        self.ofs_delta_bildirilen(
+            taban_ofset,
+            taban_tur,
+            taban_boyut,
+            hedef,
+            hedef.len() as u64,
+            komutlar,
+        )
+    }
+
+    /// Delta başlığındaki **hedef boyutu ayrıca yazılabilen** `OBJ_OFS_DELTA` girdisi.
+    ///
+    /// `hedef` yalnızca nesne adını doğru hesaplamak içindir; başlığa yazılan hedef
+    /// boyutudur `bildirilen_hedef_boyut` olur. Gerçek `git` bu ikisini eşit yazar;
+    /// ayrılabilmeleri, "başlıkta devasa bir boyut bildiren ama gövdesi birkaç bayt
+    /// olan" saldırgan pack'ini kurabilmek için gereklidir. Okuyucu bildirilen boyuta
+    /// doğrudan tahsis yaparsa bu fikstür süreci düşürür — `tests/pack.rs`
+    /// içindeki bellek tavanı regresyon testleri tam olarak bunu ölçer.
+    pub fn ofs_delta_bildirilen(
+        &mut self,
+        taban_ofset: u64,
+        taban_tur: NesneTuru,
+        taban_boyut: u64,
+        hedef: &[u8],
+        bildirilen_hedef_boyut: u64,
+        komutlar: &[u8],
+    ) -> Result<(Oid, u64), Hata> {
         let ofset = 12 + self.govde.len() as u64;
         let mesafe = ofset
             .checked_sub(taban_ofset)
             .ok_or_else(|| hata("ofs-delta taban ofseti nesneden sonra"))?;
-        let mut ham = delta_basligi(taban_boyut, hedef.len() as u64);
+        let mut ham = delta_basligi(taban_boyut, bildirilen_hedef_boyut);
         ham.extend_from_slice(komutlar);
         let mut baslik = baslik_kodla(6, ham.len() as u64);
         baslik.extend_from_slice(&mesafe_kodla(mesafe));

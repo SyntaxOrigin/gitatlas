@@ -237,7 +237,7 @@ impl PaketDosyasi {
                     )));
                 }
                 let (tur, taban) = self.coz(magaza, taban_ofset, ayar, derinlik + 1)?;
-                let hedef = delta::uygula(&taban, &veri)?;
+                let hedef = delta::uygula(&taban, &veri, ayar.nesne_tavani)?;
                 Ok((tur, hedef))
             }
             NesneTuru::RefDelta => {
@@ -248,7 +248,7 @@ impl PaketDosyasi {
                 // ya da zincirle) aynı nesneyi talep ederse döngü hatası üretilir.
                 let _kilitle = magaza.cozum_kilidi(&taban_oid)?;
                 let taban_nesne = magaza.coz(&taban_oid, ayar, derinlik + 1)?;
-                let hedef = delta::uygula(&taban_nesne.veri, &veri)?;
+                let hedef = delta::uygula(&taban_nesne.veri, &veri, ayar.nesne_tavani)?;
                 Ok((taban_nesne.tur, hedef))
             }
             tur => Ok((tur, veri)),

@@ -11,6 +11,12 @@
 //! Delta başlığı iki değişken uzunluklu tam sayıdır: kaynak boyutu ve hedef boyutu.
 //! Üretilen hedef, bildirilen boyutla birebir aynı olmak zorundadır; aksi hâlde pack
 //! bozuk sayılır.
+//!
+//! Güvenlik: bildirilen hedef boyut güvenilmeyen pack'ten gelir ve varint ile 10
+//! bayta kadar kodlandığı için teorik olarak `u64::MAX`'e kadar olabilir. Bu yüzden
+//! boyut **önce** `tavan` ile sınırlanır, ardından hedef komut başına blok blok
+//! büyütülür — bildirilen sayı hiçbir zaman doğrudan tahsis miktarı olmaz
+//! (`zlib.rs`teki inflate ile aynı politika).
 
 use crate::hata::Hata;
 
@@ -65,7 +71,13 @@ pub fn baslik_ayikla(veri: &[u8]) -> Result<DeltaBasligi, Hata> {
 ///
 /// `veri` yalnızca komut gövdesidir (başlık ayrıca okunur); başlık yine de burada
 /// yeniden ayrıştırılır çünkü hedef boyutu doğrulaması zorunludur.
-pub fn uygula(kaynak: &[u8], veri: &[u8]) -> Result<Vec<u8>, Hata> {
+///
+/// `tavan` tek nesne için izin verilen çözülmüş boyut sınırıdır (`Ayarlar::nesne_tavani`).
+/// Başlıkta bildirilen hedef boyut bu sınırı aşıyorsa **tahsis yapılmadan** hata
+/// döner: bildirilen sayı `u64::MAX`'e kadar çıkabilir ve doğrudan
+/// `Vec::with_capacity` ile kullanılırsa `capacity overflow` paniği üretir — panik
+/// `abort` olduğu için bu, hata değil sürecin düşmesidir.
+pub fn uygula(kaynak: &[u8], veri: &[u8], tavan: u64) -> Result<Vec<u8>, Hata> {
     let baslik = baslik_ayikla(veri)?;
     if baslik.kaynak_boyut != kaynak.len() as u64 {
         return Err(bozuk(format!(
@@ -74,8 +86,16 @@ pub fn uygula(kaynak: &[u8], veri: &[u8]) -> Result<Vec<u8>, Hata> {
             kaynak.len()
         )));
     }
+    if baslik.hedef_boyut > tavan {
+        return Err(Hata::CozmeSiniriAsildi {
+            bayt: baslik.hedef_boyut,
+            tav: tavan,
+        });
+    }
 
-    let mut hedef: Vec<u8> = Vec::with_capacity(baslik.hedef_boyut as usize);
+    // Hedef komut başına blok blok büyür; bildirilen boyut yalnızca tavan denetimi
+    // ve döngü sonundaki sonuç doğrulaması için kullanılır, tahsis için değil.
+    let mut hedef: Vec<u8> = Vec::new();
     let mut imlec = baslik.komut_basi;
 
     while imlec < veri.len() {
@@ -133,6 +153,9 @@ pub fn uygula(kaynak: &[u8], veri: &[u8]) -> Result<Vec<u8>, Hata> {
             imlec = son;
         }
 
+        // Büyümenin üst sınırı: başlık denetiminden geçen `hedef_boyut` tavanın
+        // altında olduğu için bu kontrol aynı zamanda hedefin bellek tahtasını da
+        // sınırlar; komutlar küçük bir akışla devasa içerik üretmeye çalışsa burada kesilir.
         if hedef.len() as u64 > baslik.hedef_boyut {
             return Err(bozuk(format!(
                 "hedef {} baytı aştı (bildirilen {})",
@@ -180,6 +203,16 @@ mod tests {
         v
     }
 
+    /// Testlerde kullanılan nesne tavanı; `Ayarlar::nesne_tavani` ile aynı varsayılan.
+    const TAVAN: u64 = 64 * 1024 * 1024;
+
+    /// Küçük bir taban nesne: saldırgan delta'ları bunun üzerine yazılır.
+    const TABAN: &[u8] = b"taban";
+
+    fn uygula_test(kaynak: &[u8], veri: &[u8]) -> Result<Vec<u8>, Hata> {
+        uygula(kaynak, veri, TAVAN)
+    }
+
     #[test]
     fn baslik_ayiklanir() {
         let veri = delta(10, 3, &[3, b'a', b'b', b'c']);
@@ -191,21 +224,21 @@ mod tests {
     #[test]
     fn ekle_komutu_uygulanir() {
         let veri = delta(0, 3, &[3, b'a', b'b', b'c']);
-        assert_eq!(uygula(&[], &veri).expect("uygulanmalı"), b"abc");
+        assert_eq!(uygula_test(&[], &veri).expect("uygulanmalı"), b"abc");
     }
 
     #[test]
     fn kopyala_komutu_uygulanir() {
         // 0x80 | 0x10 (boyut 1 bayt) | ofset baytı yok -> kaynak[0..1]
         let veri = delta(5, 1, &[0x90, 1]);
-        assert_eq!(uygula(b"hello", &veri).expect("uygulanmalı"), b"h");
+        assert_eq!(uygula_test(b"hello", &veri).expect("uygulanmalı"), b"h");
     }
 
     #[test]
     fn kopyala_ofset_baytlari_okunur() {
         // ofset 2, boyut 3 -> kaynak[2..5]
         let veri = delta(5, 3, &[0x91, 2, 3]);
-        assert_eq!(uygula(b"hello", &veri).expect("uygulanmalı"), b"llo");
+        assert_eq!(uygula_test(b"hello", &veri).expect("uygulanmalı"), b"llo");
     }
 
     #[test]
@@ -213,7 +246,7 @@ mod tests {
         let kaynak = vec![b'x'; 0x10000];
         // 0x80 | 0x20 (boyut baytı 1) | 0 -> boyut 0 => 0x10000
         let veri = delta(0x10000, 0x10000, &[0xa0, 0x00]);
-        let sonuc = uygula(&kaynak, &veri).expect("uygulanmalı");
+        let sonuc = uygula_test(&kaynak, &veri).expect("uygulanmalı");
         assert_eq!(sonuc.len(), 0x10000);
     }
 
@@ -221,7 +254,7 @@ mod tests {
     fn kaynak_disi_kopyalama_hata_verir() {
         let veri = delta(3, 5, &[0x91, 1, 5]);
         assert!(matches!(
-            uygula(b"abc", &veri),
+            uygula_test(b"abc", &veri),
             Err(Hata::DeltaBozuk { .. })
         ));
     }
@@ -229,26 +262,35 @@ mod tests {
     #[test]
     fn sifir_bayt_ekleme_hata_verir() {
         let veri = delta(0, 0, &[0x00]);
-        assert!(matches!(uygula(&[], &veri), Err(Hata::DeltaBozuk { .. })));
+        assert!(matches!(
+            uygula_test(&[], &veri),
+            Err(Hata::DeltaBozuk { .. })
+        ));
     }
 
     #[test]
     fn ekleme_aktisi_asersa_hata_verir() {
         let veri = delta(0, 5, &[4, b'a']);
-        assert!(matches!(uygula(&[], &veri), Err(Hata::DeltaBozuk { .. })));
+        assert!(matches!(
+            uygula_test(&[], &veri),
+            Err(Hata::DeltaBozuk { .. })
+        ));
     }
 
     #[test]
     fn hedef_boyut_tutmazsa_hata_verir() {
         let veri = delta(0, 9, &[3, b'a', b'b', b'c']);
-        assert!(matches!(uygula(&[], &veri), Err(Hata::DeltaBozuk { .. })));
+        assert!(matches!(
+            uygula_test(&[], &veri),
+            Err(Hata::DeltaBozuk { .. })
+        ));
     }
 
     #[test]
     fn kaynak_boyut_tutmazsa_hata_verir() {
         let veri = delta(7, 1, &[1, b'x']);
         assert!(matches!(
-            uygula(b"abc", &veri),
+            uygula_test(b"abc", &veri),
             Err(Hata::DeltaBozuk { .. })
         ));
     }
@@ -257,5 +299,130 @@ mod tests {
     fn varint_yarida_kesilirse_hata_verir() {
         let veri = [0x80u8, 0x80];
         assert!(matches!(baslik_ayikla(&veri), Err(Hata::DeltaBozuk { .. })));
+    }
+
+    /// Regresyon: güvenilmeyen pack'te `hedef_boyut` 10 baytlık varint ile
+    /// `u64::MAX`'e kadar yazılabilir. Bu boyut doğrudan `Vec::with_capacity`
+    /// girdiğinde `capacity overflow` paniği üretir; profil `panic = "abort"`
+    /// olduğu için hata değil **sürecin düşmesi** olurdu.
+    #[test]
+    fn devasa_hedef_boyut_tahsis_yapmadan_hata_verir() {
+        for bildirilen in [u64::MAX, 1u64 << 63, 1u64 << 40] {
+            // Komutlar küçük: yalnızca başlıktaki sayı tehlikeli.
+            let veri = delta(TABAN.len() as u64, bildirilen, &[4, b'a', b'b', b'c', b'd']);
+            let hata = uygula_test(TABAN, &veri).expect_err("tavan aşımı hata vermeli");
+            assert!(
+                matches!(
+                    hata,
+                    Hata::CozmeSiniriAsildi {
+                        bayt,
+                        tav: TAVAN
+                    } if bayt == bildirilen
+                ),
+                "beklenmeyen hata ({bildirilen}): {hata}"
+            );
+        }
+    }
+
+    /// Aynı senaryo tavan biraz düşürüldüğünde de geçerli: sınır, sabit bir
+    /// "güvenli sayı" değil, her zaman `tavan` argümanıdır.
+    #[test]
+    fn tavan_asimi_tam_sinirda_gecerli() {
+        let veri = delta(0, 1024, &[1, b'x']);
+        // Tavan tam sınırda: başlık denetimi geçer, hata yalnızca sonuç boyutundan gelir.
+        let tam = uygula(&[], &veri, 1024).expect_err("sonuç boyutu tutmamalı");
+        assert!(matches!(tam, Hata::DeltaBozuk { .. }), "beklenmeyen: {tam}");
+
+        // Tavan bir bayt altında: tahsis yapılmadan tavan hatası.
+        let alt = uygula(&[], &veri, 1023).expect_err("tavan altı reddedilmeli");
+        assert!(
+            matches!(
+                alt,
+                Hata::CozmeSiniriAsildi {
+                    bayt: 1024,
+                    tav: 1023
+                }
+            ),
+            "beklenmeyen: {alt}"
+        );
+    }
+
+    /// Blok blok büyüme deseni sonucu bozmamalı: çok sayıda küçük komut, tek bir
+    /// büyük tahsis olmadan da birebir aynı içeriği üretir.
+    #[test]
+    fn blok_blok_buyume_dogru_sonuc_uretir() {
+        let kaynak: Vec<u8> = (0..256u16).map(|i| i as u8).collect();
+        let mut komutlar: Vec<u8> = Vec::new();
+        let mut beklenen: Vec<u8> = Vec::new();
+
+        // 400 tur: kaynaktan 37 bayt kopyala, 61 bayt ekle. Hedef ~39 KB,
+        // yani başlangıç tahsisi olmadan defalarca büyüme döngüsü çalışır.
+        for _ in 0..400 {
+            komutlar.extend_from_slice(&kopya_komutu(7, 37));
+            beklenen.extend_from_slice(&kaynak[7..44]);
+
+            let parca: Vec<u8> = (0..61u8).map(|i| i.wrapping_add(b'0')).collect();
+            komutlar.push(61);
+            komutlar.extend_from_slice(&parca);
+            beklenen.extend_from_slice(&parca);
+        }
+
+        let veri = delta(kaynak.len() as u64, beklenen.len() as u64, &komutlar);
+        let sonuc = uygula_test(&kaynak, &veri).expect("blok blok büyüme doğru sonuç vermeli");
+        assert_eq!(sonuc.len(), beklenen.len());
+        assert_eq!(sonuc, beklenen);
+    }
+
+    /// Meşru ve tavan içinde kalan büyük delta hâlâ okunabilmeli: ön tahsis
+    /// kaldırıldığı için 4 MiB'lık bir hedef de blok blok büyüyerek üretilir.
+    #[test]
+    fn tavan_icinde_buyuk_delta_okunur() {
+        const BOYUT: usize = 4 * 1024 * 1024;
+        let kaynak = vec![b'g'; 0x10000];
+        // Her komut 2 bayt: 0x80|0x10 komut baytı ve 64'lük boyut baytı.
+        let komut = kopya_komutu(0, 64);
+        let tekrar = BOYUT / 64;
+        let mut komutlar = Vec::with_capacity(tekrar * komut.len());
+        for _ in 0..tekrar {
+            komutlar.extend_from_slice(&komut);
+        }
+        let veri = delta(kaynak.len() as u64, BOYUT as u64, &komutlar);
+        let sonuc = uygula_test(&kaynak, &veri).expect("tavan içindeki büyük delta okunmalı");
+        assert_eq!(sonuc.len(), BOYUT);
+        assert!(sonuc.iter().all(|b| *b == b'g'));
+    }
+
+    /// Hedefin tam tavan boyutunda olması da kabul edilir; sınır `>` ile denetlenir.
+    #[test]
+    fn tam_tavan_boyutlu_hedef_kabul_edilir() {
+        let kaynak = vec![b'k'; 64];
+        let veri = delta(64, 64, &kopya_komutu(0, 64));
+        let sonuc = uygula(&kaynak, &veri, 64).expect("tavan sınırındaki nesne kabul edilmeli");
+        assert_eq!(sonuc, kaynak);
+    }
+
+    /// Testlerde kullanılan "kopyala ofset..ofset+boyut" komutu üreticisi.
+    /// `yazici::delta_kopya` ile aynı belirtimi uygular; buradaki sürüm, delta.rs'in
+    /// kendi iç testinin `pub` yüzeye bağımlı kalmaması için gereklidir.
+    fn kopya_komutu(ofset: usize, boyut: usize) -> Vec<u8> {
+        let mut komut = 0x80u8;
+        let mut baytlar = Vec::new();
+        for i in 0..4u32 {
+            let b = ((ofset >> (8 * i)) & 0xff) as u8;
+            if b != 0 {
+                komut |= 1 << i;
+                baytlar.push(b);
+            }
+        }
+        for i in 0..3u32 {
+            let b = ((boyut >> (8 * i)) & 0xff) as u8;
+            if b != 0 {
+                komut |= 1 << (4 + i);
+                baytlar.push(b);
+            }
+        }
+        let mut v = vec![komut];
+        v.extend_from_slice(&baytlar);
+        v
     }
 }

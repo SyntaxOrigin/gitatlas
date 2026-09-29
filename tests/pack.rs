@@ -11,13 +11,18 @@ use gitatlas::hata::Hata;
 use gitatlas::magaza::Magaza;
 use gitatlas::nesne::NesneTuru;
 use gitatlas::oid::Oid;
-use gitatlas::paket::yazici::{delta_basligi, delta_ekle, PaketYazici};
+use gitatlas::paket::yazici::{delta_basligi, delta_ekle, delta_kopya, PaketYazici};
 use gitatlas::paket::PaketDosyasi;
 use yardimci::GeciciDizin;
 
 fn ayar() -> Ayarlar {
     Ayarlar::default()
 }
+
+/// `Ayarlar::nesne_tavani` varsayılanı. `matches!` deseni sabit yol istediği için
+/// tekrar edilir; `devasa_hedef_boyutlu_delta_sureci_dusurmez` içinde varsayılanla
+/// eşitliği de doğrulanır, böylece iki değer sessizce ayrışamaz.
+const NESNE_TAVANI: u64 = 64 * 1024 * 1024;
 
 #[test]
 fn duz_nesne_packten_okunur() {
@@ -423,6 +428,106 @@ fn bulunmayan_nesne_hata_verir() {
     let yok = Oid::ayikla("00000000000000000000000000000000000000ff").expect("ad");
     let hata = magaza.nesne(&yok).expect_err("hata vermeli");
     assert!(matches!(hata, Hata::NesneBulunamadi { .. }));
+}
+
+/// Regresyon (DoS): delta başlığında bildirilen hedef boyut 10 baytlık varint ile
+/// `u64::MAX`'e kadar yazılabilir. Bu sayı doğrudan `Vec::with_capacity` girdiğinde
+/// `capacity overflow` paniği doğurur; profil `panic = "abort"` olduğu için bu bir hata
+/// değil **sürecin düşmesidir** (`0xC0000409`). Test üç ayrı devasa değerle, süreç
+/// ayakta kalırken kontrollü `CozmeSiniriAsildi` hatası üretildiğini doğrular.
+#[test]
+fn devasa_hedef_boyutlu_delta_sureci_dusurmez() {
+    for bildirilen in [u64::MAX, 1u64 << 63, 1u64 << 40] {
+        let etiket = format!("pack-dos-{bildirilen}");
+        let gecici = GeciciDizin::yeni(&etiket).expect("geçici dizin");
+        let git = gecici.iskelet().expect("iskelet");
+        assert_eq!(ayar().nesne_tavani, NESNE_TAVANI);
+
+        let taban_veri = b"taban".to_vec();
+        let mut yazici = PaketYazici::yeni();
+        let (_, taban_ofset) = yazici.duz(NesneTuru::Blob, &taban_veri).expect("taban");
+        let (kotu, _) = yazici
+            .ofs_delta_bildirilen(
+                taban_ofset,
+                NesneTuru::Blob,
+                taban_veri.len() as u64,
+                b"aaaa",
+                bildirilen,
+                &delta_ekle(b"aaaa"),
+            )
+            .expect("saldırgan delta");
+        yazici
+            .yaz(&git.join("objects/pack"), "pack-dos")
+            .expect("yaz");
+
+        // 1) Nesne çözümü kontrollü hata verir (panik yok).
+        let magaza = Magaza::ac(&git, ayar()).expect("mağaza");
+        let hata = magaza.nesne(&kotu).expect_err("tavan aşımı hata vermeli");
+        assert!(
+            matches!(
+                hata,
+                Hata::CozmeSiniriAsildi {
+                    bayt,
+                    tav: NESNE_TAVANI
+                } if bayt == bildirilen
+            ),
+            "beklenmeyen hata ({bildirilen}): {hata}"
+        );
+
+        // 2) `ozet --butunluk` yolunun karşılığı olan bütünlük denetimi de
+        //    düşmez: her nesne çözülürken aynı hataya çarpar.
+        let tam = Magaza::ac(&git, ayar()).expect("mağaza");
+        let rapor = tam.paketleri_dogrula();
+        assert!(
+            rapor.is_err(),
+            "bütünlük denetimi de saldırgan nesneyi reddetmeli"
+        );
+    }
+}
+
+/// Meşru ve tavan içinde kalan büyük delta hâlâ okunmalı: blok blok büyüme
+/// kaldırılan ön tahsisi telafi etmiyor, yani bu bir işlevsel bozulma değil.
+#[test]
+fn tavan_icindeki_buyuk_delta_cozulur() {
+    const BOYUT: usize = 8 * 1024 * 1024;
+    let gecici = GeciciDizin::yeni("pack-buyuk-delta").expect("geçici dizin");
+    let git = gecici.iskelet().expect("iskelet");
+
+    // Taban bilinçli olarak küçük tutulur: `yazici::mesafe_kodla` ofs-delta
+    // mesafesini tek bayta sığdıracak biçimde kodlar (bilinen yazıcı sınırı,
+    // gerçek git'in 7-bit zincir kodlaması değil). Mesafe 128 baytı aşarsa bu
+    // fikstür geçersiz bir pack üretir; 64 baytlık taban mesafeyi tek baytta tutar.
+    let taban_veri = vec![b'g'; 64];
+    let hedef_veri = vec![b'g'; BOYUT];
+    // Tabanı 64 baytlık bloklar hâlinde kopyala: 131.072 komut, 8 MiB hedef.
+    let kopya = delta_kopya(0, 64);
+    let tekrar = BOYUT / 64;
+    let mut komutlar = Vec::with_capacity(tekrar * kopya.len());
+    for _ in 0..tekrar {
+        komutlar.extend_from_slice(&kopya);
+    }
+
+    let mut yazici = PaketYazici::yeni();
+    let (taban, taban_ofset) = yazici.duz(NesneTuru::Blob, &taban_veri).expect("taban");
+    let (delta, _) = yazici
+        .ofs_delta_ozel(
+            taban_ofset,
+            NesneTuru::Blob,
+            taban_veri.len() as u64,
+            &hedef_veri,
+            &komutlar,
+        )
+        .expect("büyük delta");
+    yazici
+        .yaz(&git.join("objects/pack"), "pack-buyuk")
+        .expect("yaz");
+
+    let magaza = Magaza::ac(&git, ayar()).expect("mağaza");
+    let okunan = magaza.nesne(&delta).expect("büyük delta okunmalı").veri;
+    assert_eq!(okunan.len(), BOYUT);
+    assert_eq!(okunan, hedef_veri);
+    // Taban da bozulmadan okunabilmeli.
+    assert_eq!(magaza.nesne(&taban).expect("taban").veri, taban_veri);
 }
 
 /// Aynı nesneyi hem pack'e hem gevşek dosyaya yazar; gevşek kopya **bozuktur**.
