@@ -1,0 +1,30 @@
+[package]
+name = "gitatlas"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+license = "MIT"
+description = "Git kurulu olmayan bir makinede .git dizinini salt okunur okuyup depo haritası, gecmis ve diff ureten terminal araci."
+repository = "https://github.com/SyntaxOrigin/gitatlas"
+readme = "README.md"
+keywords = ["git", "cli", "diff", "repository", "readonly"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+# serde_json: `src/cikti.rs` ozet/gecmis/diff ciktilarini sabit semali JSON ve Markdown olarak
+# uretir; tek JSON yaziciya sahip olmak cikti butunlugu icin gerekli.
+serde_json = "1"
+# clap: `src/main.rs` alt komutlarini (ozet/gecmis/diff) ve bayraklarini elle ayristirmak
+# yerine turetilmis, tip guvenli bir yapi olarak tanimlar.
+clap = { version = "4", features = ["derive"] }
+# flate2: `src/zlib.rs` zlib (RFC 1950) akislarini inflate eder. Git hem loose object'lari
+# hem de .pack icerigini zlib ile sikistirir; DEFLATE kodunu elle yazmak en hatali katmandir.
+# Yalnizca miniz_oxide (saf Rust) backend kullanilir; C kutuphanesi baglanmaz.
+flate2 = { version = "1", default-features = false, features = ["miniz_oxide"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
